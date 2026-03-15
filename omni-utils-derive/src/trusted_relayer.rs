@@ -149,6 +149,7 @@ fn gen_bypass_is_trusted(bypass_roles: &[Expr]) -> TokenStream2 {
 
 fn gen_trait_impl(
     self_ty: &syn::Type,
+    generics: &syn::Generics,
     bypass_roles: &Option<Vec<Expr>>,
     custom_is_trusted_relayer: bool,
 ) -> TokenStream2 {
@@ -156,21 +157,24 @@ fn gen_trait_impl(
         return quote! {};
     }
 
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+
     let override_method = bypass_roles
         .as_ref()
         .map(|roles| gen_bypass_is_trusted(roles));
 
     quote! {
-        impl ::omni_utils::trusted_relayer::TrustedRelayer for #self_ty {
+        impl #impl_generics ::omni_utils::trusted_relayer::TrustedRelayer for #self_ty #where_clause {
             #override_method
         }
     }
 }
 
-fn gen_public_methods(self_ty: &syn::Type, manager_roles: &[Expr]) -> TokenStream2 {
+fn gen_public_methods(self_ty: &syn::Type, generics: &syn::Generics, manager_roles: &[Expr]) -> TokenStream2 {
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
     quote! {
         #[::near_sdk::near]
-        impl #self_ty {
+        impl #impl_generics #self_ty #where_clause {
             pub fn is_trusted_relayer(
                 &self,
                 account_id: &::near_sdk::AccountId,
@@ -284,8 +288,9 @@ fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
     inject_guards(&mut item_impl);
 
     let self_ty = &item_impl.self_ty;
-    let trait_impl = gen_trait_impl(self_ty, &args.bypass_roles, args.custom_is_trusted_relayer);
-    let public_methods = gen_public_methods(self_ty, &args.manager_roles);
+    let generics = &item_impl.generics;
+    let trait_impl = gen_trait_impl(self_ty, generics, &args.bypass_roles, args.custom_is_trusted_relayer);
+    let public_methods = gen_public_methods(self_ty, generics, &args.manager_roles);
 
     let output = quote! {
         #item_impl
