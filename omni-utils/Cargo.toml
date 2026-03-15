@@ -11,5 +11,6 @@ crate-type = ["cdylib", "rlib"]
 serde.workspace = true
 serde_json.workspace = true
 near-sdk.workspace = true
+near-plugins.workspace = true
 
 omni-utils-derive.workspace = true
