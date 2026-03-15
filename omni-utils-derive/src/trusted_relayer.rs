@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Expr, ItemFn, ItemImpl, Token, parenthesized, parse_macro_input};
+use syn::{Expr, ImplItem, ItemFn, ItemImpl, Token, parenthesized, parse_macro_input};
 
 struct RoleExpr {
     expr: Expr,
@@ -16,67 +16,85 @@ impl Parse for RoleExpr {
     }
 }
 
-struct NamedRoleList {
-    name: syn::Ident,
-    roles: Vec<Expr>,
+enum MacroParam {
+    RoleList { name: syn::Ident, roles: Vec<Expr> },
+    Flag(syn::Ident),
 }
 
-impl Parse for NamedRoleList {
+impl Parse for MacroParam {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name: syn::Ident = input.parse()?;
-        let content;
-        parenthesized!(content in input);
-        let roles: Punctuated<RoleExpr, Token![,]> =
-            content.parse_terminated(RoleExpr::parse, Token![,])?;
-        Ok(NamedRoleList {
-            name,
-            roles: roles.into_iter().map(|r| r.expr).collect(),
-        })
+        if input.peek(syn::token::Paren) {
+            let content;
+            parenthesized!(content in input);
+            let roles: Punctuated<RoleExpr, Token![,]> =
+                content.parse_terminated(RoleExpr::parse, Token![,])?;
+            Ok(MacroParam::RoleList {
+                name,
+                roles: roles.into_iter().map(|r| r.expr).collect(),
+            })
+        } else {
+            Ok(MacroParam::Flag(name))
+        }
     }
 }
 
 struct TrustedRelayerImplArgs {
     bypass_roles: Option<Vec<Expr>>,
     manager_roles: Vec<Expr>,
+    custom_is_trusted_relayer: bool,
 }
 
 impl Parse for TrustedRelayerImplArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut bypass_roles = None;
         let mut manager_roles = None;
+        let mut custom_is_trusted_relayer = false;
 
-        let items: Punctuated<NamedRoleList, Token![,]> =
-            input.parse_terminated(NamedRoleList::parse, Token![,])?;
+        let items: Punctuated<MacroParam, Token![,]> =
+            input.parse_terminated(MacroParam::parse, Token![,])?;
 
         for item in items {
-            match item.name.to_string().as_str() {
-                "bypass_roles" => {
-                    if bypass_roles.is_some() {
+            match item {
+                MacroParam::RoleList { name, roles } => match name.to_string().as_str() {
+                    "bypass_roles" => {
+                        if bypass_roles.is_some() {
+                            return Err(syn::Error::new(name.span(), "duplicate `bypass_roles`"));
+                        }
+                        bypass_roles = Some(roles);
+                    }
+                    "manager_roles" => {
+                        if manager_roles.is_some() {
+                            return Err(syn::Error::new(
+                                name.span(),
+                                "duplicate `manager_roles`",
+                            ));
+                        }
+                        manager_roles = Some(roles);
+                    }
+                    other => {
                         return Err(syn::Error::new(
-                            item.name.span(),
-                            "duplicate `bypass_roles`",
+                            name.span(),
+                            format!(
+                                "unknown parameter `{other}`, expected \
+                                 `bypass_roles`, `manager_roles`, or `custom_is_trusted_relayer`"
+                            ),
                         ));
                     }
-                    bypass_roles = Some(item.roles);
-                }
-                "manager_roles" => {
-                    if manager_roles.is_some() {
+                },
+                MacroParam::Flag(name) => match name.to_string().as_str() {
+                    "custom_is_trusted_relayer" => {
+                        custom_is_trusted_relayer = true;
+                    }
+                    other => {
                         return Err(syn::Error::new(
-                            item.name.span(),
-                            "duplicate `manager_roles`",
+                            name.span(),
+                            format!(
+                                "unknown flag `{other}`, expected `custom_is_trusted_relayer`"
+                            ),
                         ));
                     }
-                    manager_roles = Some(item.roles);
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        item.name.span(),
-                        format!(
-                            "unknown parameter `{other}`, \
-                             expected `bypass_roles` or `manager_roles`"
-                        ),
-                    ));
-                }
+                },
             }
         }
 
@@ -87,9 +105,17 @@ impl Parse for TrustedRelayerImplArgs {
             )
         })?;
 
+        if custom_is_trusted_relayer && bypass_roles.is_some() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`custom_is_trusted_relayer` and `bypass_roles` are mutually exclusive",
+            ));
+        }
+
         Ok(TrustedRelayerImplArgs {
             bypass_roles,
             manager_roles,
+            custom_is_trusted_relayer,
         })
     }
 }
@@ -121,7 +147,15 @@ fn gen_bypass_is_trusted(bypass_roles: &[Expr]) -> TokenStream2 {
     }
 }
 
-fn gen_trait_impl(self_ty: &syn::Type, bypass_roles: &Option<Vec<Expr>>) -> TokenStream2 {
+fn gen_trait_impl(
+    self_ty: &syn::Type,
+    bypass_roles: &Option<Vec<Expr>>,
+    custom_is_trusted_relayer: bool,
+) -> TokenStream2 {
+    if custom_is_trusted_relayer {
+        return quote! {};
+    }
+
     let override_method = bypass_roles
         .as_ref()
         .map(|roles| gen_bypass_is_trusted(roles));
@@ -212,12 +246,45 @@ fn gen_public_methods(self_ty: &syn::Type, manager_roles: &[Expr]) -> TokenStrea
     }
 }
 
+/// Check if an attribute path matches `trusted_relayer`.
+fn is_trusted_relayer_attr(attr: &syn::Attribute) -> bool {
+    attr.path().is_ident("trusted_relayer")
+}
+
+/// Inject the guard into method bodies that have `#[trusted_relayer]`,
+/// and strip the attribute so downstream macros don't see it.
+fn inject_guards(item_impl: &mut ItemImpl) {
+    let guard: syn::Stmt = syn::parse2(quote! {
+        ::near_sdk::require!(
+            <Self as ::omni_utils::trusted_relayer::TrustedRelayer>::is_trusted_relayer(
+                self,
+                &::near_sdk::env::predecessor_account_id(),
+            ),
+            "Relayer is not active"
+        );
+    })
+    .expect("failed to parse trusted_relayer guard statement");
+
+    for item in &mut item_impl.items {
+        if let ImplItem::Fn(method) = item {
+            let has_attr = method.attrs.iter().any(is_trusted_relayer_attr);
+            if has_attr {
+                method.attrs.retain(|a| !is_trusted_relayer_attr(a));
+                method.block.stmts.insert(0, guard.clone());
+            }
+        }
+    }
+}
+
 fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as TrustedRelayerImplArgs);
-    let item_impl = parse_macro_input!(input as ItemImpl);
+    let mut item_impl = parse_macro_input!(input as ItemImpl);
+
+    // Process method-level #[trusted_relayer] before passing to #[near]
+    inject_guards(&mut item_impl);
 
     let self_ty = &item_impl.self_ty;
-    let trait_impl = gen_trait_impl(self_ty, &args.bypass_roles);
+    let trait_impl = gen_trait_impl(self_ty, &args.bypass_roles, args.custom_is_trusted_relayer);
     let public_methods = gen_public_methods(self_ty, &args.manager_roles);
 
     let output = quote! {
