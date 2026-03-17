@@ -53,3 +53,23 @@ impl TestContract {
         )
     }
 }
+
+/// Second impl block using guard-only mode (`#[trusted_relayer]` without args).
+/// This tests the multi-impl-block pattern where only the primary block above
+/// carries `manager_roles`/`bypass_roles` and generates the public methods.
+#[trusted_relayer]
+#[near]
+impl TestContract {
+    /// Guarded method in a separate impl block — only active relayers
+    /// (or bypass-role holders) can call this.
+    #[trusted_relayer]
+    pub fn relayer_only_method_secondary(&mut self) -> u64 {
+        self.value += 10;
+        self.value
+    }
+
+    /// Unguarded method in the secondary block — anyone can call it.
+    pub fn get_value_secondary(&self) -> u64 {
+        self.value
+    }
+}

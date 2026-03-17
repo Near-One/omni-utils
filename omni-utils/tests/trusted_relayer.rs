@@ -871,3 +871,96 @@ async fn test_self_call_bypass() {
         .unwrap();
     assert_eq!(value.data, 1, "Self-call should increment value");
 }
+
+#[tokio::test]
+async fn test_secondary_relayer_method_with_active_relayer() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+
+    // Apply (instant activation with waiting_period = 0)
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer.clone())
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Call the method from the secondary (guard-only) impl block
+    Contract(contract_id.clone())
+        .call_function("relayer_only_method_secondary", json!({}))
+        .transaction()
+        .with_signer(relayer_id, relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Secondary relayer-only method should succeed for active relayer")
+        .assert_success();
+
+    // Verify value was incremented by 10
+    let value: Data<u64> = Contract(contract_id)
+        .call_function("get_value", ())
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(
+        value.data, 10,
+        "Value should be incremented by 10 from secondary method"
+    );
+}
+
+#[tokio::test]
+async fn test_secondary_relayer_method_without_relayer() {
+    let env = get_env().await;
+    let (contract_id, _) = deploy_contract(env).await;
+    let (random_id, random_signer) = create_account(env, 10).await;
+
+    // Call without being a relayer
+    let result = Contract(contract_id)
+        .call_function("relayer_only_method_secondary", json!({}))
+        .transaction()
+        .with_signer(random_id, random_signer)
+        .send_to(&env.network)
+        .await;
+
+    assert!(
+        result.is_err() || result.as_ref().is_ok_and(|r| r.is_failure()),
+        "Non-relayer should not be able to call secondary relayer-only method"
+    );
+}
+
+#[tokio::test]
+async fn test_secondary_bypass_role_allows_method() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (bypasser_id, bypasser_signer) = create_account(env, 10).await;
+
+    // Grant Relayer role (bypass role — no staking needed)
+    grant_role(env, &contract_id, &contract_signer, "Relayer", &bypasser_id).await;
+
+    // Call the secondary method without ever staking
+    Contract(contract_id.clone())
+        .call_function("relayer_only_method_secondary", json!({}))
+        .transaction()
+        .with_signer(bypasser_id, bypasser_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Bypass role holder should be able to call secondary relayer method")
+        .assert_success();
+
+    // Verify value was incremented by 10
+    let value: Data<u64> = Contract(contract_id)
+        .call_function("get_value", ())
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(value.data, 10, "Value should be incremented by 10");
+}

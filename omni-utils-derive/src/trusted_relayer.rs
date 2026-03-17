@@ -280,6 +280,19 @@ fn inject_guards(item_impl: &mut ItemImpl) {
     }
 }
 
+/// Guard-only mode: `#[trusted_relayer]` on an impl block without arguments.
+/// Only injects guards into methods annotated with `#[trusted_relayer]`.
+/// Does NOT generate public methods or trait impl — those are emitted by
+/// the "full" mode (with `manager_roles(...)` etc.).
+///
+/// This allows multiple impl blocks to use `#[trusted_relayer]` method guards
+/// while only one block carries the full configuration.
+fn process_impl_block_guard_only(input: TokenStream) -> TokenStream {
+    let mut item_impl = parse_macro_input!(input as ItemImpl);
+    inject_guards(&mut item_impl);
+    quote! { #item_impl }.into()
+}
+
 fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as TrustedRelayerImplArgs);
     let mut item_impl = parse_macro_input!(input as ItemImpl);
@@ -324,7 +337,14 @@ pub fn trusted_relayer(args: TokenStream, input: TokenStream) -> TokenStream {
     let input_clone: proc_macro2::TokenStream = input.clone().into();
 
     if is_impl_block(&input_clone) {
-        process_impl_block(args, input)
+        if args.is_empty() {
+            // Guard-only mode: inject guards into #[trusted_relayer] methods
+            // without generating public methods or trait impl.
+            process_impl_block_guard_only(input)
+        } else {
+            // Full mode: inject guards, generate trait impl + public methods.
+            process_impl_block(args, input)
+        }
     } else {
         if !args.is_empty() {
             return syn::Error::new(
