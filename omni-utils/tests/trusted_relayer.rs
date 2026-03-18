@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::OnceCell;
 
-fn build_wasm(path: &str, target_dir: &str) -> Vec<u8> {
+fn build_wasm(path: &str, target_dir: &str, no_locked: bool) -> Vec<u8> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
         .expect("canonicalize manifest dir");
@@ -22,6 +22,7 @@ fn build_wasm(path: &str, target_dir: &str) -> Vec<u8> {
                 .expect("camino PathBuf from path"),
         ),
         override_cargo_target_dir: Some(sub_target.to_string_lossy().to_string()),
+        no_locked,
         ..Default::default()
     })
     .unwrap_or_else(|err| panic!("building contract from {path}: {err:?}"));
@@ -29,8 +30,21 @@ fn build_wasm(path: &str, target_dir: &str) -> Vec<u8> {
     std::fs::read(&artifact.path).unwrap()
 }
 
-static CONTRACT_WASM: LazyLock<Vec<u8>> =
-    LazyLock::new(|| build_wasm("../tests/test-contract/Cargo.toml", "test-contract-build"));
+static CONTRACT_WASM: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    build_wasm(
+        "../tests/test-contract/Cargo.toml",
+        "test-contract-build",
+        false,
+    )
+});
+
+static CUSTOM_CONTRACT_WASM: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    build_wasm(
+        "../tests/test-contract-custom/Cargo.toml",
+        "test-contract-custom-build",
+        false,
+    )
+});
 
 struct TestEnv {
     sandbox: Sandbox,
@@ -43,8 +57,9 @@ static ENV: OnceCell<TestEnv> = OnceCell::const_new();
 
 async fn get_env() -> &'static TestEnv {
     ENV.get_or_init(|| async {
-        // Force WASM build before starting sandbox
+        // Force WASM builds before starting sandbox
         let _ = &*CONTRACT_WASM;
+        let _ = &*CUSTOM_CONTRACT_WASM;
 
         let sandbox = Sandbox::start_sandbox()
             .await
@@ -102,6 +117,27 @@ async fn deploy_contract(env: &TestEnv) -> (near_api::AccountId, Arc<Signer>) {
         .send_to(&env.network)
         .await
         .expect("Failed to deploy contract")
+        .assert_success();
+
+    (account_id, signer)
+}
+
+/// Deploy the custom test-contract (with `custom_is_trusted_relayer`).
+/// Accepts an optional `always_trusted` account for the custom bypass logic.
+async fn deploy_custom_contract(
+    env: &TestEnv,
+    always_trusted: Option<&near_api::AccountId>,
+) -> (near_api::AccountId, Arc<Signer>) {
+    let (account_id, signer) = create_account(env, 50).await;
+
+    Contract::deploy(account_id.clone())
+        .use_code(CUSTOM_CONTRACT_WASM.to_vec())
+        .with_init_call("new", json!({ "always_trusted": always_trusted }))
+        .unwrap()
+        .with_signer(signer.clone())
+        .send_to(&env.network)
+        .await
+        .expect("Failed to deploy custom contract")
         .assert_success();
 
     (account_id, signer)
@@ -1188,4 +1224,167 @@ async fn test_active_relayer_can_call_special_method() {
         .await
         .unwrap();
     assert_eq!(value.data, 100, "Value should be incremented by 100");
+}
+
+#[tokio::test]
+async fn test_custom_always_trusted_can_call_guarded_method() {
+    let env = get_env().await;
+    let (trusted_id, trusted_signer) = create_account(env, 10).await;
+
+    // Deploy with always_trusted set to the trusted account
+    let (contract_id, _) = deploy_custom_contract(env, Some(&trusted_id)).await;
+
+    // The always_trusted account can call the guarded method without staking
+    Contract(contract_id.clone())
+        .call_function("guarded_method", json!({}))
+        .transaction()
+        .with_signer(trusted_id, trusted_signer)
+        .send_to(&env.network)
+        .await
+        .expect("always_trusted account should bypass the relayer check")
+        .assert_success();
+
+    let value: Data<u64> = Contract(contract_id)
+        .call_function("get_value", ())
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(value.data, 1, "Value should be incremented by 1");
+}
+
+#[tokio::test]
+async fn test_custom_random_account_cannot_call_guarded_method() {
+    let env = get_env().await;
+    let (trusted_id, _) = create_account(env, 10).await;
+    let (random_id, random_signer) = create_account(env, 10).await;
+
+    // Deploy with always_trusted set to a different account
+    let (contract_id, _) = deploy_custom_contract(env, Some(&trusted_id)).await;
+
+    // A random account (not trusted, not staked) should fail
+    let result = Contract(contract_id)
+        .call_function("guarded_method", json!({}))
+        .transaction()
+        .with_signer(random_id, random_signer)
+        .send_to(&env.network)
+        .await;
+
+    assert!(
+        result.is_err() || result.as_ref().is_ok_and(|r| r.is_failure()),
+        "Random account should not pass the custom is_trusted_relayer check"
+    );
+}
+
+#[tokio::test]
+async fn test_custom_staked_relayer_can_call_guarded_method() {
+    let env = get_env().await;
+
+    // Deploy with no always_trusted account
+    let (contract_id, contract_signer) = deploy_custom_contract(env, None).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+
+    // Stake as relayer
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer.clone())
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Staked relayer can call guarded method (custom is_trusted_relayer falls back to staking map)
+    Contract(contract_id.clone())
+        .call_function("guarded_method", json!({}))
+        .transaction()
+        .with_signer(relayer_id, relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Staked relayer should pass the custom is_trusted_relayer check")
+        .assert_success();
+
+    let value: Data<u64> = Contract(contract_id)
+        .call_function("get_value", ())
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(value.data, 1, "Value should be incremented by 1");
+}
+
+#[tokio::test]
+async fn test_custom_no_always_trusted_random_fails() {
+    let env = get_env().await;
+
+    // Deploy with no always_trusted account
+    let (contract_id, _) = deploy_custom_contract(env, None).await;
+    let (random_id, random_signer) = create_account(env, 10).await;
+
+    // Random account should fail (no always_trusted, not staked)
+    let result = Contract(contract_id)
+        .call_function("guarded_method", json!({}))
+        .transaction()
+        .with_signer(random_id, random_signer)
+        .send_to(&env.network)
+        .await;
+
+    assert!(
+        result.is_err() || result.as_ref().is_ok_and(|r| r.is_failure()),
+        "Random account should not pass when no always_trusted is set and not staked"
+    );
+}
+
+#[tokio::test]
+async fn test_custom_generated_public_methods_exist() {
+    let env = get_env().await;
+
+    let (trusted_id, _) = create_account(env, 10).await;
+    let (contract_id, contract_signer) = deploy_custom_contract(env, Some(&trusted_id)).await;
+
+    // Verify that the custom is_trusted_relayer is used by the generated public method
+    let is_trusted: Data<bool> = Contract(contract_id.clone())
+        .call_function("is_trusted_relayer", json!({ "account_id": trusted_id }))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert!(
+        is_trusted.data,
+        "Custom is_trusted_relayer should return true for always_trusted account"
+    );
+
+    // Verify config methods are generated
+    let config: Data<serde_json::Value> = Contract(contract_id.clone())
+        .call_function("get_relayer_config", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert!(
+        !config.data.is_null(),
+        "get_relayer_config should return a valid config"
+    );
+
+    // Verify admin can set config (manager_roles includes Admin)
+    grant_role(env, &contract_id, &contract_signer, "Admin", &contract_id).await;
+    Contract(contract_id.clone())
+        .call_function(
+            "set_relayer_config",
+            json!({
+                "stake_required": near_api::NearToken::from_near(1),
+                "waiting_period_ns": "0",
+            }),
+        )
+        .transaction()
+        .with_signer(contract_id.clone(), contract_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Admin should be able to set config")
+        .assert_success();
 }

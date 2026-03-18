@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["omni-utils", "omni-utils-derive"]
-# test-contract is excluded from the workspace because it targets wasm32 and
+# Test contracts are excluded from the workspace because they target wasm32 and
 # must NOT inherit the `non-contract-usage` near-sdk feature.
-exclude = ["tests/test-contract"]
+exclude = ["tests/test-contract", "tests/test-contract-custom"]
 
 [workspace.package]
 version = "0.1.0"
