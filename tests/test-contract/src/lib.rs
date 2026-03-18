@@ -6,6 +6,7 @@ use omni_utils::macros::trusted_relayer;
 #[near(serializers=[json])]
 pub enum Role {
     Admin,
+    RelayerManager,
     Relayer,
 }
 
@@ -16,7 +17,11 @@ pub struct TestContract {
     value: u64,
 }
 
-#[trusted_relayer(manager_roles(Role::Admin), bypass_roles(Role::Relayer))]
+#[trusted_relayer(
+    manager_roles(Role::Admin, Role::RelayerManager),
+    config_roles(Role::Admin),
+    bypass_roles(Role::Relayer),
+)]
 #[near]
 impl TestContract {
     #[init]

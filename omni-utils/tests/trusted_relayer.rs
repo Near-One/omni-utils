@@ -262,17 +262,11 @@ async fn test_apply_with_sufficient_stake() {
     let (admin_id, admin_signer) = create_account(env, 10).await;
     let (relayer_id, relayer_signer) = create_account(env, 20).await;
 
-    // Grant admin, set low stake config
+    // Grant admin, set stake config with a long waiting period so the
+    // application remains "pending" (not yet active) when we query it.
+    // Other tests may fast_forward the sandbox, so use a very large value.
     grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
-    set_short_config(
-        env,
-        &contract_id,
-        &admin_id,
-        &admin_signer,
-        5,
-        1_000_000_000,
-    )
-    .await;
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, u64::MAX).await;
 
     // Apply
     let contract = Contract(contract_id.clone());
@@ -286,7 +280,8 @@ async fn test_apply_with_sufficient_stake() {
         .expect("Apply should succeed")
         .assert_success();
 
-    // Verify application exists
+    // Verify application exists (get_relayer_application only returns
+    // pending applications — those not yet past the waiting period)
     let app: Data<serde_json::Value> = contract
         .call_function(
             "get_relayer_application",
@@ -963,4 +958,109 @@ async fn test_secondary_bypass_role_allows_method() {
         .await
         .unwrap();
     assert_eq!(value.data, 10, "Value should be incremented by 10");
+}
+
+#[tokio::test]
+async fn test_relayer_manager_can_reject() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (manager_id, manager_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    // Grant Admin to set config, RelayerManager to the manager
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    grant_role(
+        env,
+        &contract_id,
+        &contract_signer,
+        "RelayerManager",
+        &manager_id,
+    )
+    .await;
+
+    set_short_config(
+        env,
+        &contract_id,
+        &admin_id,
+        &admin_signer,
+        5,
+        3_600_000_000_000,
+    )
+    .await;
+
+    // Relayer applies
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // RelayerManager rejects — should succeed (manager_roles includes RelayerManager)
+    Contract(contract_id.clone())
+        .call_function(
+            "reject_relayer_application",
+            json!({ "account_id": relayer_id }),
+        )
+        .transaction()
+        .with_signer(manager_id, manager_signer)
+        .send_to(&env.network)
+        .await
+        .expect("RelayerManager should be able to reject")
+        .assert_success();
+
+    // Verify application is gone
+    let app: Data<serde_json::Value> = Contract(contract_id)
+        .call_function(
+            "get_relayer_application",
+            json!({ "account_id": relayer_id }),
+        )
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert!(
+        app.data.is_null(),
+        "Application should be removed after rejection"
+    );
+}
+
+#[tokio::test]
+async fn test_relayer_manager_cannot_set_config() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (manager_id, manager_signer) = create_account(env, 10).await;
+
+    // Grant only RelayerManager (not Admin)
+    grant_role(
+        env,
+        &contract_id,
+        &contract_signer,
+        "RelayerManager",
+        &manager_id,
+    )
+    .await;
+
+    // RelayerManager tries to set config — should fail (config_roles is Admin only)
+    let result = Contract(contract_id)
+        .call_function(
+            "set_relayer_config",
+            json!({
+                "stake_required": near_api::NearToken::from_near(1),
+                "waiting_period_ns": "0",
+            }),
+        )
+        .transaction()
+        .with_signer(manager_id, manager_signer)
+        .send_to(&env.network)
+        .await;
+
+    assert!(
+        result.is_err() || result.as_ref().is_ok_and(|r| r.is_failure()),
+        "RelayerManager should not be able to set config (requires Admin via config_roles)"
+    );
 }

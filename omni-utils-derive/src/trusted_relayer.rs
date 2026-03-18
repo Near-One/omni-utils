@@ -42,6 +42,8 @@ impl Parse for MacroParam {
 struct TrustedRelayerImplArgs {
     bypass_roles: Option<Vec<Expr>>,
     manager_roles: Vec<Expr>,
+    /// Optional separate roles for `set_relayer_config`. Falls back to `manager_roles` if absent.
+    config_roles: Option<Vec<Expr>>,
     custom_is_trusted_relayer: bool,
 }
 
@@ -49,6 +51,7 @@ impl Parse for TrustedRelayerImplArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut bypass_roles = None;
         let mut manager_roles = None;
+        let mut config_roles = None;
         let mut custom_is_trusted_relayer = false;
 
         let items: Punctuated<MacroParam, Token![,]> =
@@ -72,12 +75,22 @@ impl Parse for TrustedRelayerImplArgs {
                         }
                         manager_roles = Some(roles);
                     }
+                    "config_roles" => {
+                        if config_roles.is_some() {
+                            return Err(syn::Error::new(
+                                name.span(),
+                                "duplicate `config_roles`",
+                            ));
+                        }
+                        config_roles = Some(roles);
+                    }
                     other => {
                         return Err(syn::Error::new(
                             name.span(),
                             format!(
                                 "unknown parameter `{other}`, expected \
-                                 `bypass_roles`, `manager_roles`, or `custom_is_trusted_relayer`"
+                                 `bypass_roles`, `manager_roles`, `config_roles`, \
+                                 or `custom_is_trusted_relayer`"
                             ),
                         ));
                     }
@@ -115,6 +128,7 @@ impl Parse for TrustedRelayerImplArgs {
         Ok(TrustedRelayerImplArgs {
             bypass_roles,
             manager_roles,
+            config_roles,
             custom_is_trusted_relayer,
         })
     }
@@ -170,7 +184,12 @@ fn gen_trait_impl(
     }
 }
 
-fn gen_public_methods(self_ty: &syn::Type, generics: &syn::Generics, manager_roles: &[Expr]) -> TokenStream2 {
+fn gen_public_methods(
+    self_ty: &syn::Type,
+    generics: &syn::Generics,
+    manager_roles: &[Expr],
+    config_roles: &[Expr],
+) -> TokenStream2 {
     let (impl_generics, _, where_clause) = generics.split_for_impl();
     quote! {
         #[::near_sdk::near]
@@ -205,7 +224,7 @@ fn gen_public_methods(self_ty: &syn::Type, generics: &syn::Generics, manager_rol
                 )
             }
 
-            #[::near_plugins::access_control_any(roles(#(#manager_roles),*))]
+            #[::near_plugins::access_control_any(roles(#(#config_roles),*))]
             pub fn set_relayer_config(
                 &mut self,
                 stake_required: ::near_sdk::NearToken,
@@ -303,7 +322,8 @@ fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
     let self_ty = &item_impl.self_ty;
     let generics = &item_impl.generics;
     let trait_impl = gen_trait_impl(self_ty, generics, &args.bypass_roles, args.custom_is_trusted_relayer);
-    let public_methods = gen_public_methods(self_ty, generics, &args.manager_roles);
+    let config_roles = args.config_roles.as_deref().unwrap_or(&args.manager_roles);
+    let public_methods = gen_public_methods(self_ty, generics, &args.manager_roles, config_roles);
 
     let output = quote! {
         #item_impl
