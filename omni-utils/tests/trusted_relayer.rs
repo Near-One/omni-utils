@@ -1064,3 +1064,128 @@ async fn test_relayer_manager_cannot_set_config() {
         "RelayerManager should not be able to set config (requires Admin via config_roles)"
     );
 }
+
+#[tokio::test]
+async fn test_special_bypass_can_call_special_method() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (special_id, special_signer) = create_account(env, 10).await;
+
+    // Grant SpecialRelayer role (method-level bypass for special_relayer_method)
+    grant_role(
+        env,
+        &contract_id,
+        &contract_signer,
+        "SpecialRelayer",
+        &special_id,
+    )
+    .await;
+
+    Contract(contract_id.clone())
+        .call_function("special_relayer_method", json!({}))
+        .transaction()
+        .with_signer(special_id, special_signer)
+        .send_to(&env.network)
+        .await
+        .expect("SpecialRelayer should bypass special_relayer_method")
+        .assert_success();
+
+    let value: Data<u64> = Contract(contract_id)
+        .call_function("get_value", ())
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(value.data, 100, "Value should be incremented by 100");
+}
+
+#[tokio::test]
+async fn test_special_bypass_cannot_call_default_method() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (special_id, special_signer) = create_account(env, 10).await;
+
+    // Grant SpecialRelayer role — but relayer_only_method uses impl-level bypass (Relayer)
+    grant_role(
+        env,
+        &contract_id,
+        &contract_signer,
+        "SpecialRelayer",
+        &special_id,
+    )
+    .await;
+
+    let result = Contract(contract_id)
+        .call_function("relayer_only_method", json!({}))
+        .transaction()
+        .with_signer(special_id, special_signer)
+        .send_to(&env.network)
+        .await;
+
+    assert!(
+        result.is_err() || result.as_ref().is_ok_and(|r| r.is_failure()),
+        "SpecialRelayer should NOT be able to call relayer_only_method (uses impl-level bypass)"
+    );
+}
+
+#[tokio::test]
+async fn test_default_bypass_cannot_call_special_method() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (relayer_id, relayer_signer) = create_account(env, 10).await;
+
+    // Grant Relayer role (impl-level bypass) — but special_relayer_method overrides to SpecialRelayer
+    grant_role(env, &contract_id, &contract_signer, "Relayer", &relayer_id).await;
+
+    let result = Contract(contract_id)
+        .call_function("special_relayer_method", json!({}))
+        .transaction()
+        .with_signer(relayer_id, relayer_signer)
+        .send_to(&env.network)
+        .await;
+
+    assert!(
+        result.is_err() || result.as_ref().is_ok_and(|r| r.is_failure()),
+        "Relayer (impl-level bypass) should NOT be able to call special_relayer_method (overridden to SpecialRelayer)"
+    );
+}
+
+#[tokio::test]
+async fn test_active_relayer_can_call_special_method() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+
+    // Stake as relayer (instant activation with waiting_period = 0)
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer.clone())
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Active staked relayer can call special_relayer_method via staking map fallback
+    Contract(contract_id.clone())
+        .call_function("special_relayer_method", json!({}))
+        .transaction()
+        .with_signer(relayer_id, relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Active staked relayer should be able to call special_relayer_method")
+        .assert_success();
+
+    let value: Data<u64> = Contract(contract_id)
+        .call_function("get_value", ())
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(value.data, 100, "Value should be incremented by 100");
+}

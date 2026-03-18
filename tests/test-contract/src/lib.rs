@@ -8,6 +8,7 @@ pub enum Role {
     Admin,
     RelayerManager,
     Relayer,
+    SpecialRelayer,
 }
 
 #[access_control(role_type(Role))]
@@ -41,6 +42,15 @@ impl TestContract {
     #[trusted_relayer]
     pub fn relayer_only_method(&mut self) -> u64 {
         self.value += 1;
+        self.value
+    }
+
+    /// Method with per-method bypass_roles override.
+    /// Only `SpecialRelayer` can bypass — NOT `Relayer` (the impl-level bypass role).
+    /// Active staked relayers can still call this via the staking map fallback.
+    #[trusted_relayer(bypass_roles(Role::SpecialRelayer))]
+    pub fn special_relayer_method(&mut self) -> u64 {
+        self.value += 100;
         self.value
     }
 

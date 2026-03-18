@@ -1,8 +1,8 @@
 use near_sdk::borsh::{self, BorshDeserialize};
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{U64, U128};
 use near_sdk::serde_json::json;
 use near_sdk::store::LookupMap;
-use near_sdk::{env, near, require, AccountId, NearToken, Promise};
+use near_sdk::{AccountId, NearToken, Promise, env, near, require};
 
 const TR_CONFIG_KEY: &[u8] = b"__tr_config";
 const TR_RELAYERS_PREFIX: &[u8] = b"__tr_relayers";

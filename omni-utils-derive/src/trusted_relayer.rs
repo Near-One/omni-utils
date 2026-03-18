@@ -68,19 +68,13 @@ impl Parse for TrustedRelayerImplArgs {
                     }
                     "manager_roles" => {
                         if manager_roles.is_some() {
-                            return Err(syn::Error::new(
-                                name.span(),
-                                "duplicate `manager_roles`",
-                            ));
+                            return Err(syn::Error::new(name.span(), "duplicate `manager_roles`"));
                         }
                         manager_roles = Some(roles);
                     }
                     "config_roles" => {
                         if config_roles.is_some() {
-                            return Err(syn::Error::new(
-                                name.span(),
-                                "duplicate `config_roles`",
-                            ));
+                            return Err(syn::Error::new(name.span(), "duplicate `config_roles`"));
                         }
                         config_roles = Some(roles);
                     }
@@ -102,9 +96,7 @@ impl Parse for TrustedRelayerImplArgs {
                     other => {
                         return Err(syn::Error::new(
                             name.span(),
-                            format!(
-                                "unknown flag `{other}`, expected `custom_is_trusted_relayer`"
-                            ),
+                            format!("unknown flag `{other}`, expected `custom_is_trusted_relayer`"),
                         ));
                     }
                 },
@@ -274,10 +266,76 @@ fn is_trusted_relayer_attr(attr: &syn::Attribute) -> bool {
     attr.path().is_ident("trusted_relayer")
 }
 
+/// Parse method-level `#[trusted_relayer(bypass_roles(R1, R2, ...))]` arguments.
+/// Returns `None` for bare `#[trusted_relayer]`, `Some(roles)` for bypass_roles override.
+fn parse_method_bypass_roles(attr: &syn::Attribute) -> Option<Vec<Expr>> {
+    match &attr.meta {
+        syn::Meta::Path(_) => None, // bare #[trusted_relayer]
+        syn::Meta::List(list) => {
+            let parsed: syn::Result<Punctuated<MacroParam, Token![,]>> =
+                list.parse_args_with(Punctuated::parse_terminated);
+            let params = parsed.expect(
+                "`#[trusted_relayer]` on methods only accepts `bypass_roles(...)` argument",
+            );
+            let mut bypass = None;
+            for param in params {
+                match param {
+                    MacroParam::RoleList { name, roles } if name == "bypass_roles" => {
+                        bypass = Some(roles);
+                    }
+                    _ => panic!(
+                        "`#[trusted_relayer]` on methods only accepts `bypass_roles(...)` argument"
+                    ),
+                }
+            }
+            bypass
+        }
+        _ => panic!("`#[trusted_relayer]` does not support this syntax"),
+    }
+}
+
+/// Generate an inline guard that checks method-specific bypass roles,
+/// falling back to the staking map (completely replacing impl-level bypass roles).
+fn gen_method_bypass_guard(bypass_roles: &[Expr]) -> syn::Stmt {
+    let role_into: Vec<TokenStream2> = bypass_roles
+        .iter()
+        .map(|role| {
+            quote! { <_ as ::core::convert::Into<String>>::into(#role) }
+        })
+        .collect();
+
+    syn::parse2(quote! {
+        {
+            let __caller = ::near_sdk::env::predecessor_account_id();
+            if !::near_plugins::AccessControllable::acl_has_any_role(
+                self,
+                ::std::vec![#(#role_into),*],
+                __caller.clone(),
+            ) {
+                ::near_sdk::require!(
+                    ::omni_utils::trusted_relayer::tr_relayers_map()
+                        .get(&__caller)
+                        .is_some_and(|state| {
+                            ::near_sdk::env::block_timestamp() >= state.activate_at.0
+                        }),
+                    "Relayer is not active"
+                );
+            }
+        }
+    })
+    .expect("failed to parse method bypass guard")
+}
+
 /// Inject the guard into method bodies that have `#[trusted_relayer]`,
 /// and strip the attribute so downstream macros don't see it.
+///
+/// - `#[trusted_relayer]` (no args): injects a guard that calls `is_trusted_relayer`
+///   (uses impl-level bypass roles).
+/// - `#[trusted_relayer(bypass_roles(R1, R2))]`: injects an inline guard that checks
+///   the specified roles via ACL, falling back to the staking map directly. This
+///   completely replaces the impl-level bypass roles for that method.
 fn inject_guards(item_impl: &mut ItemImpl) {
-    let guard: syn::Stmt = syn::parse2(quote! {
+    let default_guard: syn::Stmt = syn::parse2(quote! {
         ::near_sdk::require!(
             <Self as ::omni_utils::trusted_relayer::TrustedRelayer>::is_trusted_relayer(
                 self,
@@ -290,10 +348,14 @@ fn inject_guards(item_impl: &mut ItemImpl) {
 
     for item in &mut item_impl.items {
         if let ImplItem::Fn(method) = item {
-            let has_attr = method.attrs.iter().any(is_trusted_relayer_attr);
-            if has_attr {
+            let tr_attr = method.attrs.iter().find(|a| is_trusted_relayer_attr(a));
+            if let Some(attr) = tr_attr {
+                let guard = match parse_method_bypass_roles(attr) {
+                    Some(roles) => gen_method_bypass_guard(&roles),
+                    None => default_guard.clone(),
+                };
                 method.attrs.retain(|a| !is_trusted_relayer_attr(a));
-                method.block.stmts.insert(0, guard.clone());
+                method.block.stmts.insert(0, guard);
             }
         }
     }
@@ -321,7 +383,12 @@ fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let self_ty = &item_impl.self_ty;
     let generics = &item_impl.generics;
-    let trait_impl = gen_trait_impl(self_ty, generics, &args.bypass_roles, args.custom_is_trusted_relayer);
+    let trait_impl = gen_trait_impl(
+        self_ty,
+        generics,
+        &args.bypass_roles,
+        args.custom_is_trusted_relayer,
+    );
     let config_roles = args.config_roles.as_deref().unwrap_or(&args.manager_roles);
     let public_methods = gen_public_methods(self_ty, generics, &args.manager_roles, config_roles);
 
