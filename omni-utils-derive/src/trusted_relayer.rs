@@ -42,8 +42,7 @@ impl Parse for MacroParam {
 struct TrustedRelayerImplArgs {
     bypass_roles: Option<Vec<Expr>>,
     manager_roles: Vec<Expr>,
-    /// Optional separate roles for `set_relayer_config`. Falls back to `manager_roles` if absent.
-    config_roles: Option<Vec<Expr>>,
+    config_roles: Vec<Expr>,
     custom_is_trusted_relayer: bool,
 }
 
@@ -107,6 +106,13 @@ impl Parse for TrustedRelayerImplArgs {
             syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "`manager_roles(...)` is required for `#[trusted_relayer]` on impl blocks",
+            )
+        })?;
+
+        let config_roles = config_roles.ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`config_roles(...)` is required for `#[trusted_relayer]` on impl blocks",
             )
         })?;
 
@@ -389,8 +395,8 @@ fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.bypass_roles,
         args.custom_is_trusted_relayer,
     );
-    let config_roles = args.config_roles.as_deref().unwrap_or(&args.manager_roles);
-    let public_methods = gen_public_methods(self_ty, generics, &args.manager_roles, config_roles);
+    let public_methods =
+        gen_public_methods(self_ty, generics, &args.manager_roles, &args.config_roles);
 
     let output = quote! {
         #item_impl
