@@ -41,7 +41,11 @@ impl TrustedRelayer for CustomContract {
     }
 }
 
-#[trusted_relayer(manager_roles(Role::Admin), custom_is_trusted_relayer)]
+#[trusted_relayer(
+    manager_roles(Role::Admin),
+    config_roles(Role::Admin),
+    custom_is_trusted_relayer
+)]
 #[near]
 impl CustomContract {
     #[init]

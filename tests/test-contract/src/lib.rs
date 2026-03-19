@@ -19,9 +19,9 @@ pub struct TestContract {
 }
 
 #[trusted_relayer(
-    manager_roles(Role::Admin, Role::RelayerManager),
-    config_roles(Role::Admin),
     bypass_roles(Role::Relayer),
+    manager_roles(Role::Admin, Role::RelayerManager),
+    config_roles(Role::Admin)
 )]
 #[near]
 impl TestContract {
