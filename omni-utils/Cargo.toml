@@ -13,3 +13,10 @@ serde_json.workspace = true
 near-sdk.workspace = true
 
 omni-utils-derive.workspace = true
+
+[dev-dependencies]
+near-sandbox = { version = "0.3", features = ["generate", "singleton_cleanup"] }
+near-api = "0.8"
+cargo-near-build = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "test-contract-custom"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.24.1"
+near-plugins = { git = "https://github.com/Near-One/near-plugins.git", tag = "v0.4.1" }
+omni-utils = { path = "../../omni-utils" }
