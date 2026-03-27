@@ -1,11 +1,12 @@
 use near_sdk::borsh::{self, BorshDeserialize};
 use near_sdk::json_types::{U64, U128};
 use near_sdk::serde_json::json;
-use near_sdk::store::LookupMap;
+use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, NearToken, Promise, env, near, require};
 
 const TR_CONFIG_KEY: &[u8] = b"__tr_config";
 const TR_RELAYERS_PREFIX: &[u8] = b"__tr_relayers";
+const TR_RELAYERS_META_KEY: &[u8] = b"__tr_relayers_meta";
 
 #[derive(Debug, Clone)]
 #[near(serializers = [json, borsh])]
@@ -71,8 +72,25 @@ pub fn tr_save_config(config: &RelayerConfig) {
     );
 }
 
-pub fn tr_relayers_map() -> LookupMap<AccountId, RelayerState> {
-    LookupMap::new(TR_RELAYERS_PREFIX)
+/// Load the relayers map, restoring iteration metadata from storage.
+/// On first use (no metadata yet), creates a fresh empty map.
+pub fn tr_load_relayers() -> IterableMap<AccountId, RelayerState> {
+    match env::storage_read(TR_RELAYERS_META_KEY) {
+        Some(bytes) => BorshDeserialize::try_from_slice(&bytes)
+            .unwrap_or_else(|_| env::panic_str("Failed to deserialize relayers map metadata")),
+        None => IterableMap::new(TR_RELAYERS_PREFIX),
+    }
+}
+
+/// Flush pending writes and persist the relayers map metadata (length + prefixes)
+/// so that future calls can restore iteration state.
+pub fn tr_save_relayers(mut map: IterableMap<AccountId, RelayerState>) {
+    map.flush();
+    env::storage_write(
+        TR_RELAYERS_META_KEY,
+        &borsh::to_vec(&map)
+            .unwrap_or_else(|_| env::panic_str("Failed to serialize relayers map metadata")),
+    );
 }
 
 /// Trusted relayer staking support for NEAR contracts.
@@ -87,14 +105,14 @@ pub trait TrustedRelayer {
             return true;
         }
 
-        tr_relayers_map()
+        tr_load_relayers()
             .get(account_id)
             .is_some_and(|state| env::block_timestamp() >= state.activate_at.0)
     }
 
     fn _tr_apply(&mut self) {
         let account_id = env::predecessor_account_id();
-        let mut relayers = tr_relayers_map();
+        let mut relayers = tr_load_relayers();
 
         require!(
             relayers.get(&account_id).is_none(),
@@ -123,6 +141,8 @@ pub trait TrustedRelayer {
             },
         );
 
+        tr_save_relayers(relayers);
+
         TrustedRelayerEvent::RelayerApplyEvent {
             account_id: account_id.clone(),
             stake: config.stake_required,
@@ -137,7 +157,7 @@ pub trait TrustedRelayer {
 
     fn _tr_resign(&mut self) -> Promise {
         let account_id = env::predecessor_account_id();
-        let mut relayers = tr_relayers_map();
+        let mut relayers = tr_load_relayers();
 
         let state = relayers
             .remove(&account_id)
@@ -147,6 +167,8 @@ pub trait TrustedRelayer {
             env::block_timestamp() >= state.activate_at.0,
             "Relayer is not active yet"
         );
+
+        tr_save_relayers(relayers);
 
         TrustedRelayerEvent::RelayerResignEvent {
             account_id: account_id.clone(),
@@ -158,11 +180,13 @@ pub trait TrustedRelayer {
     }
 
     fn _tr_reject(&mut self, account_id: AccountId) -> Promise {
-        let mut relayers = tr_relayers_map();
+        let mut relayers = tr_load_relayers();
 
         let state = relayers
             .remove(&account_id)
             .unwrap_or_else(|| env::panic_str("Relayer application not found"));
+
+        tr_save_relayers(relayers);
 
         TrustedRelayerEvent::RelayerRejectEvent {
             account_id: account_id.clone(),
@@ -181,14 +205,14 @@ pub trait TrustedRelayer {
     }
 
     fn _tr_get_application(&self, account_id: &AccountId) -> Option<RelayerState> {
-        tr_relayers_map()
+        tr_load_relayers()
             .get(account_id)
             .filter(|state| env::block_timestamp() < state.activate_at.0)
             .cloned()
     }
 
     fn _tr_get_stake(&self, account_id: &AccountId) -> Option<U128> {
-        tr_relayers_map()
+        tr_load_relayers()
             .get(account_id)
             .filter(|state| env::block_timestamp() >= state.activate_at.0)
             .map(|state| U128(state.stake.as_yoctonear()))
@@ -196,5 +220,37 @@ pub trait TrustedRelayer {
 
     fn _tr_get_config(&self) -> RelayerConfig {
         tr_load_config()
+    }
+
+    fn _tr_get_active_relayers(
+        &self,
+        from_index: Option<u32>,
+        limit: Option<u32>,
+    ) -> Vec<(AccountId, RelayerState)> {
+        let relayers = tr_load_relayers();
+        let now = env::block_timestamp();
+        relayers
+            .iter()
+            .filter(|(_, state)| now >= state.activate_at.0)
+            .skip(from_index.unwrap_or(0) as usize)
+            .take(limit.unwrap_or(100) as usize)
+            .map(|(id, state)| (id.clone(), state.clone()))
+            .collect()
+    }
+
+    fn _tr_get_pending_relayers(
+        &self,
+        from_index: Option<u32>,
+        limit: Option<u32>,
+    ) -> Vec<(AccountId, RelayerState)> {
+        let relayers = tr_load_relayers();
+        let now = env::block_timestamp();
+        relayers
+            .iter()
+            .filter(|(_, state)| now < state.activate_at.0)
+            .skip(from_index.unwrap_or(0) as usize)
+            .take(limit.unwrap_or(100) as usize)
+            .map(|(id, state)| (id.clone(), state.clone()))
+            .collect()
     }
 }

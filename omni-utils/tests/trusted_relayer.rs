@@ -1388,3 +1388,381 @@ async fn test_custom_generated_public_methods_exist() {
         .expect("Admin should be able to set config")
         .assert_success();
 }
+
+#[tokio::test]
+async fn test_get_active_relayers_empty() {
+    let env = get_env().await;
+    let (contract_id, _) = deploy_contract(env).await;
+
+    let result: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert!(result.data.is_empty(), "Should return empty list when no relayers exist");
+}
+
+#[tokio::test]
+async fn test_get_pending_relayers_empty() {
+    let env = get_env().await;
+    let (contract_id, _) = deploy_contract(env).await;
+
+    let result: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function("get_pending_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert!(result.data.is_empty(), "Should return empty list when no relayers exist");
+}
+
+#[tokio::test]
+async fn test_get_pending_relayers_returns_pending() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    // Long waiting period so the relayer stays pending
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, u64::MAX).await;
+
+    // Apply
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Should appear in pending
+    let pending: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function("get_pending_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(pending.data.len(), 1, "Should have one pending relayer");
+    assert_eq!(
+        pending.data[0].0,
+        relayer_id.to_string(),
+        "Pending relayer account_id should match"
+    );
+
+    // Should NOT appear in active
+    let active: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert!(active.data.is_empty(), "Should have no active relayers while pending");
+}
+
+#[tokio::test]
+async fn test_get_active_relayers_returns_active() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    // 0 waiting period → instantly active
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+
+    // Apply
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Should appear in active
+    let active: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(active.data.len(), 1, "Should have one active relayer");
+    assert_eq!(
+        active.data[0].0,
+        relayer_id.to_string(),
+        "Active relayer account_id should match"
+    );
+
+    // Should NOT appear in pending
+    let pending: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function("get_pending_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert!(pending.data.is_empty(), "Should have no pending relayers when instantly active");
+}
+
+#[tokio::test]
+async fn test_get_active_relayers_multiple_with_pagination() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    // 0 waiting period → instantly active
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+
+    // Apply with 3 relayers
+    let mut relayer_ids = Vec::new();
+    for _ in 0..3 {
+        let (relayer_id, relayer_signer) = create_account(env, 20).await;
+        Contract(contract_id.clone())
+            .call_function("apply_for_trusted_relayer", json!({}))
+            .transaction()
+            .deposit(near_api::NearToken::from_near(5))
+            .with_signer(relayer_id.clone(), relayer_signer)
+            .send_to(&env.network)
+            .await
+            .expect("Apply should succeed")
+            .assert_success();
+        relayer_ids.push(relayer_id.to_string());
+    }
+
+    // Get all active relayers (no pagination args)
+    let all: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(all.data.len(), 3, "Should have 3 active relayers");
+
+    // Paginate: first 2
+    let page1: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function(
+            "get_active_relayers",
+            json!({ "from_index": 0, "limit": 2 }),
+        )
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(page1.data.len(), 2, "First page should have 2 relayers");
+
+    // Paginate: next page starting from index 2
+    let page2: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function(
+            "get_active_relayers",
+            json!({ "from_index": 2, "limit": 2 }),
+        )
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(page2.data.len(), 1, "Second page should have 1 relayer");
+
+    // Paginate: beyond range
+    let page3: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function(
+            "get_active_relayers",
+            json!({ "from_index": 10, "limit": 2 }),
+        )
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert!(page3.data.is_empty(), "Page beyond range should be empty");
+}
+
+#[tokio::test]
+async fn test_get_pending_relayers_multiple_with_pagination() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    // Long waiting period so all relayers stay pending
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, u64::MAX).await;
+
+    // Apply with 3 relayers
+    for _ in 0..3 {
+        let (relayer_id, relayer_signer) = create_account(env, 20).await;
+        Contract(contract_id.clone())
+            .call_function("apply_for_trusted_relayer", json!({}))
+            .transaction()
+            .deposit(near_api::NearToken::from_near(5))
+            .with_signer(relayer_id.clone(), relayer_signer)
+            .send_to(&env.network)
+            .await
+            .expect("Apply should succeed")
+            .assert_success();
+    }
+
+    // Get all pending relayers
+    let all: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function("get_pending_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(all.data.len(), 3, "Should have 3 pending relayers");
+
+    // Paginate: first 1
+    let page1: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function(
+            "get_pending_relayers",
+            json!({ "from_index": 0, "limit": 1 }),
+        )
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(page1.data.len(), 1, "First page should have 1 relayer");
+
+    // Paginate: skip 1, take 2
+    let page2: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function(
+            "get_pending_relayers",
+            json!({ "from_index": 1, "limit": 2 }),
+        )
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(page2.data.len(), 2, "Second page should have 2 relayers");
+}
+
+#[tokio::test]
+async fn test_get_relayers_mixed_active_and_pending() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+
+    // First relayer: instantly active (waiting_period = 0)
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+    let (active_relayer_id, active_relayer_signer) = create_account(env, 20).await;
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(active_relayer_id.clone(), active_relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Second relayer: pending (long waiting period)
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, u64::MAX).await;
+    let (pending_relayer_id, pending_relayer_signer) = create_account(env, 20).await;
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(pending_relayer_id.clone(), pending_relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Verify active list
+    let active: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(active.data.len(), 1, "Should have exactly 1 active relayer");
+    assert_eq!(
+        active.data[0].0,
+        active_relayer_id.to_string(),
+        "Active relayer should be the one with 0 waiting period"
+    );
+
+    // Verify pending list
+    let pending: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function("get_pending_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+
+    assert_eq!(pending.data.len(), 1, "Should have exactly 1 pending relayer");
+    assert_eq!(
+        pending.data[0].0,
+        pending_relayer_id.to_string(),
+        "Pending relayer should be the one with long waiting period"
+    );
+}
+
+#[tokio::test]
+async fn test_get_active_relayers_after_resign() {
+    let env = get_env().await;
+    let (contract_id, contract_signer) = deploy_contract(env).await;
+    let (admin_id, admin_signer) = create_account(env, 10).await;
+    let (relayer_id, relayer_signer) = create_account(env, 20).await;
+
+    grant_role(env, &contract_id, &contract_signer, "Admin", &admin_id).await;
+    set_short_config(env, &contract_id, &admin_id, &admin_signer, 5, 0).await;
+
+    // Apply
+    Contract(contract_id.clone())
+        .call_function("apply_for_trusted_relayer", json!({}))
+        .transaction()
+        .deposit(near_api::NearToken::from_near(5))
+        .with_signer(relayer_id.clone(), relayer_signer.clone())
+        .send_to(&env.network)
+        .await
+        .expect("Apply should succeed")
+        .assert_success();
+
+    // Verify active
+    let active: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id.clone())
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert_eq!(active.data.len(), 1, "Should have 1 active relayer before resign");
+
+    // Resign
+    Contract(contract_id.clone())
+        .call_function("resign_trusted_relayer", json!({}))
+        .transaction()
+        .with_signer(relayer_id, relayer_signer)
+        .send_to(&env.network)
+        .await
+        .expect("Resign should succeed")
+        .assert_success();
+
+    // Verify empty after resign
+    let active: Data<Vec<(String, serde_json::Value)>> = Contract(contract_id)
+        .call_function("get_active_relayers", json!({}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await
+        .unwrap();
+    assert!(active.data.is_empty(), "Should have no active relayers after resign");
+}
