@@ -1,3 +1,5 @@
+use core::ops::{Deref, DerefMut};
+
 use near_sdk::borsh::{self, BorshDeserialize};
 use near_sdk::json_types::{U64, U128};
 use near_sdk::serde_json::json;
@@ -72,24 +74,59 @@ pub fn tr_save_config(config: &RelayerConfig) {
     );
 }
 
-/// Load the relayers map, restoring iteration metadata from storage.
-/// On first use (no metadata yet), creates a fresh empty map.
-pub fn tr_load_relayers() -> IterableMap<AccountId, RelayerState> {
-    match env::storage_read(TR_RELAYERS_META_KEY) {
-        Some(bytes) => BorshDeserialize::try_from_slice(&bytes)
-            .unwrap_or_else(|_| env::panic_str("Failed to deserialize relayers map metadata")),
-        None => IterableMap::new(TR_RELAYERS_PREFIX),
+/// Wrapper around `IterableMap` that automatically persists iteration metadata
+/// (the internal `len` field) on drop. Entry data is flushed by the inner
+/// `IterableMap`'s own `Drop` impl; this wrapper handles the metadata that
+/// `IterableMap` cannot persist on its own in a detached (non-struct-field) pattern.
+///
+/// Metadata is only written when the map has been mutated (via `DerefMut`),
+/// so read-only usage in view calls does not trigger `storage_write`.
+pub struct RelayerMap {
+    inner: IterableMap<AccountId, RelayerState>,
+    modified: bool,
+}
+
+impl Deref for RelayerMap {
+    type Target = IterableMap<AccountId, RelayerState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
-/// Flush pending writes and persist the relayers map metadata (length + prefixes)
-/// so that future calls can restore iteration state.
-pub fn tr_save_relayers(map: IterableMap<AccountId, RelayerState>) {
-    env::storage_write(
-        TR_RELAYERS_META_KEY,
-        &borsh::to_vec(&map)
-            .unwrap_or_else(|_| env::panic_str("Failed to serialize relayers map metadata")),
-    );
+impl DerefMut for RelayerMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.modified = true;
+        &mut self.inner
+    }
+}
+
+impl Drop for RelayerMap {
+    fn drop(&mut self) {
+        if self.modified {
+            env::storage_write(
+                TR_RELAYERS_META_KEY,
+                &borsh::to_vec(&self.inner).unwrap_or_else(|_| {
+                    env::panic_str("Failed to serialize relayers map metadata")
+                }),
+            );
+        }
+    }
+}
+
+/// Load the relayers map, restoring iteration metadata from storage.
+/// On first use (no metadata yet), creates a fresh empty map.
+/// Metadata is persisted automatically when the returned `RelayerMap` is dropped.
+pub fn tr_load_relayers() -> RelayerMap {
+    let inner = match env::storage_read(TR_RELAYERS_META_KEY) {
+        Some(bytes) => BorshDeserialize::try_from_slice(&bytes)
+            .unwrap_or_else(|_| env::panic_str("Failed to deserialize relayers map metadata")),
+        None => IterableMap::new(TR_RELAYERS_PREFIX),
+    };
+    RelayerMap {
+        inner,
+        modified: false,
+    }
 }
 
 /// Trusted relayer staking support for NEAR contracts.
@@ -140,8 +177,6 @@ pub trait TrustedRelayer {
             },
         );
 
-        tr_save_relayers(relayers);
-
         TrustedRelayerEvent::RelayerApplyEvent {
             account_id: account_id.clone(),
             stake: config.stake_required,
@@ -167,8 +202,6 @@ pub trait TrustedRelayer {
             "Relayer is not active yet"
         );
 
-        tr_save_relayers(relayers);
-
         TrustedRelayerEvent::RelayerResignEvent {
             account_id: account_id.clone(),
             stake: state.stake,
@@ -184,8 +217,6 @@ pub trait TrustedRelayer {
         let state = relayers
             .remove(&account_id)
             .unwrap_or_else(|| env::panic_str("Relayer application not found"));
-
-        tr_save_relayers(relayers);
 
         TrustedRelayerEvent::RelayerRejectEvent {
             account_id: account_id.clone(),
