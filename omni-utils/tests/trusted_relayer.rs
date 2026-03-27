@@ -1401,7 +1401,10 @@ async fn test_get_active_relayers_empty() {
         .await
         .unwrap();
 
-    assert!(result.data.is_empty(), "Should return empty list when no relayers exist");
+    assert!(
+        result.data.is_empty(),
+        "Should return empty list when no relayers exist"
+    );
 }
 
 #[tokio::test]
@@ -1416,7 +1419,10 @@ async fn test_get_pending_relayers_empty() {
         .await
         .unwrap();
 
-    assert!(result.data.is_empty(), "Should return empty list when no relayers exist");
+    assert!(
+        result.data.is_empty(),
+        "Should return empty list when no relayers exist"
+    );
 }
 
 #[tokio::test]
@@ -1464,7 +1470,10 @@ async fn test_get_pending_relayers_returns_pending() {
         .await
         .unwrap();
 
-    assert!(active.data.is_empty(), "Should have no active relayers while pending");
+    assert!(
+        active.data.is_empty(),
+        "Should have no active relayers while pending"
+    );
 }
 
 #[tokio::test]
@@ -1512,7 +1521,10 @@ async fn test_get_active_relayers_returns_active() {
         .await
         .unwrap();
 
-    assert!(pending.data.is_empty(), "Should have no pending relayers when instantly active");
+    assert!(
+        pending.data.is_empty(),
+        "Should have no pending relayers when instantly active"
+    );
 }
 
 #[tokio::test]
@@ -1709,7 +1721,11 @@ async fn test_get_relayers_mixed_active_and_pending() {
         .await
         .unwrap();
 
-    assert_eq!(pending.data.len(), 1, "Should have exactly 1 pending relayer");
+    assert_eq!(
+        pending.data.len(),
+        1,
+        "Should have exactly 1 pending relayer"
+    );
     assert_eq!(
         pending.data[0].0,
         pending_relayer_id.to_string(),
@@ -1745,7 +1761,11 @@ async fn test_get_active_relayers_after_resign() {
         .fetch_from(&env.network)
         .await
         .unwrap();
-    assert_eq!(active.data.len(), 1, "Should have 1 active relayer before resign");
+    assert_eq!(
+        active.data.len(),
+        1,
+        "Should have 1 active relayer before resign"
+    );
 
     // Resign
     Contract(contract_id.clone())
@@ -1764,5 +1784,8 @@ async fn test_get_active_relayers_after_resign() {
         .fetch_from(&env.network)
         .await
         .unwrap();
-    assert!(active.data.is_empty(), "Should have no active relayers after resign");
+    assert!(
+        active.data.is_empty(),
+        "Should have no active relayers after resign"
+    );
 }
