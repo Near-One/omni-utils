@@ -9,6 +9,7 @@ use near_sdk::{AccountId, NearToken, Promise, env, near, require};
 const TR_CONFIG_KEY: &[u8] = b"__tr_config";
 const TR_RELAYERS_PREFIX: &[u8] = b"__tr_relayers";
 const TR_RELAYERS_META_KEY: &[u8] = b"__tr_relayers_meta";
+const TR_DEFAULT_PAGE_LIMIT: u32 = 100;
 
 #[derive(Debug, Clone)]
 #[near(serializers = [json, borsh])]
@@ -263,7 +264,7 @@ pub trait TrustedRelayer {
             .iter()
             .filter(|(_, state)| now >= state.activate_at.0)
             .skip(from_index.unwrap_or(0) as usize)
-            .take(limit.unwrap_or(100) as usize)
+            .take(limit.unwrap_or(TR_DEFAULT_PAGE_LIMIT) as usize)
             .map(|(id, state)| (id.clone(), state.clone()))
             .collect()
     }
@@ -279,7 +280,7 @@ pub trait TrustedRelayer {
             .iter()
             .filter(|(_, state)| now < state.activate_at.0)
             .skip(from_index.unwrap_or(0) as usize)
-            .take(limit.unwrap_or(100) as usize)
+            .take(limit.unwrap_or(TR_DEFAULT_PAGE_LIMIT) as usize)
             .map(|(id, state)| (id.clone(), state.clone()))
             .collect()
     }
