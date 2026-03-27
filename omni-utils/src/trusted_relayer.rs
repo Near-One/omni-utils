@@ -84,8 +84,7 @@ pub fn tr_load_relayers() -> IterableMap<AccountId, RelayerState> {
 
 /// Flush pending writes and persist the relayers map metadata (length + prefixes)
 /// so that future calls can restore iteration state.
-pub fn tr_save_relayers(mut map: IterableMap<AccountId, RelayerState>) {
-    map.flush();
+pub fn tr_save_relayers(map: IterableMap<AccountId, RelayerState>) {
     env::storage_write(
         TR_RELAYERS_META_KEY,
         &borsh::to_vec(&map)
