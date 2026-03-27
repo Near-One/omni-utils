@@ -35,7 +35,7 @@ impl TrustedRelayer for CustomContract {
         }
 
         // Fall back to the standard staking map check
-        omni_utils::trusted_relayer::tr_relayers_map()
+        omni_utils::trusted_relayer::tr_load_relayers()
             .get(account_id)
             .is_some_and(|state| env::block_timestamp() >= state.activate_at.0)
     }

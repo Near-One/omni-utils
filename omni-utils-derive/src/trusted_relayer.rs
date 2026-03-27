@@ -150,7 +150,7 @@ fn gen_bypass_is_trusted(bypass_roles: &[Expr]) -> TokenStream2 {
                 return true;
             }
 
-            ::omni_utils::trusted_relayer::tr_relayers_map()
+            ::omni_utils::trusted_relayer::tr_load_relayers()
                 .get(account_id)
                 .is_some_and(|state| {
                     ::near_sdk::env::block_timestamp() >= state.activate_at.0
@@ -263,6 +263,32 @@ fn gen_public_methods(
             ) -> ::omni_utils::trusted_relayer::RelayerConfig {
                 <Self as ::omni_utils::trusted_relayer::TrustedRelayer>::_tr_get_config(self)
             }
+
+            #[must_use]
+            pub fn get_active_relayers(
+                &self,
+                from_index: Option<u32>,
+                limit: Option<u32>,
+            ) -> Vec<(::near_sdk::AccountId, ::omni_utils::trusted_relayer::RelayerState)> {
+                <Self as ::omni_utils::trusted_relayer::TrustedRelayer>::_tr_get_active_relayers(
+                    self,
+                    from_index,
+                    limit,
+                )
+            }
+
+            #[must_use]
+            pub fn get_pending_relayers(
+                &self,
+                from_index: Option<u32>,
+                limit: Option<u32>,
+            ) -> Vec<(::near_sdk::AccountId, ::omni_utils::trusted_relayer::RelayerState)> {
+                <Self as ::omni_utils::trusted_relayer::TrustedRelayer>::_tr_get_pending_relayers(
+                    self,
+                    from_index,
+                    limit,
+                )
+            }
         }
     }
 }
@@ -319,7 +345,7 @@ fn gen_method_bypass_guard(bypass_roles: &[Expr]) -> syn::Stmt {
                 __caller.clone(),
             ) {
                 ::near_sdk::require!(
-                    ::omni_utils::trusted_relayer::tr_relayers_map()
+                    ::omni_utils::trusted_relayer::tr_load_relayers()
                         .get(&__caller)
                         .is_some_and(|state| {
                             ::near_sdk::env::block_timestamp() >= state.activate_at.0
