@@ -8,8 +8,8 @@ impl<T> NearExpect<T> for Option<T> {
     }
 }
 
-impl<T, E> NearExpect<T> for Result<T, E> {
+impl<T, E: core::fmt::Debug> NearExpect<T> for Result<T, E> {
     fn near_expect(self, msg: impl AsRef<str>) -> T {
-        self.unwrap_or_else(|_| near_sdk::env::panic_str(msg.as_ref()))
+        self.unwrap_or_else(|err| near_sdk::env::panic_str(&format!("{}: {:?}", msg.as_ref(), err)))
     }
 }
