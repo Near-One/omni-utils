@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Expr, ImplItem, ItemFn, ItemImpl, Token, parenthesized, parse_macro_input};
+use syn::{Expr, ImplItem, ItemImpl, Token, parenthesized, parse_macro_input};
 
 struct RoleExpr {
     expr: Expr,
@@ -433,25 +433,6 @@ fn process_impl_block(args: TokenStream, input: TokenStream) -> TokenStream {
     output.into()
 }
 
-fn process_fn(input: TokenStream) -> TokenStream {
-    let mut item_fn = parse_macro_input!(input as ItemFn);
-
-    let guard = syn::parse2::<syn::Stmt>(quote! {
-        ::near_sdk::require!(
-            <Self as ::omni_utils::trusted_relayer::TrustedRelayer>::is_trusted_relayer(
-                self,
-                &::near_sdk::env::predecessor_account_id(),
-            ),
-            "Relayer is not active"
-        );
-    })
-    .expect("failed to parse trusted_relayer guard statement");
-
-    item_fn.block.stmts.insert(0, guard);
-
-    quote! { #item_fn }.into()
-}
-
 pub fn trusted_relayer(args: TokenStream, input: TokenStream) -> TokenStream {
     let input_clone: proc_macro2::TokenStream = input.clone().into();
 
@@ -465,15 +446,14 @@ pub fn trusted_relayer(args: TokenStream, input: TokenStream) -> TokenStream {
             process_impl_block(args, input)
         }
     } else {
-        if !args.is_empty() {
-            return syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "`#[trusted_relayer]` on methods does not accept arguments",
-            )
-            .to_compile_error()
-            .into();
-        }
-        process_fn(input)
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`#[trusted_relayer]` can only be applied to impl blocks, \
+             not standalone functions. Use it on methods inside an impl block \
+             annotated with `#[trusted_relayer]`.",
+        )
+        .to_compile_error()
+        .into()
     }
 }
 
