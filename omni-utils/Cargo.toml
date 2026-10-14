@@ -15,6 +15,9 @@ near-sdk.workspace = true
 omni-utils-derive.workspace = true
 
 [dev-dependencies]
+# Host builds of near-sdk need `non-contract-usage`. Declared here so it applies
+# to this crate's own tests without reaching dependent contracts.
+near-sdk = { workspace = true, features = ["non-contract-usage"] }
 near-sandbox = { version = "0.3.11", features = ["generate", "singleton_cleanup"] }
 near-api = "0.8.6"
 cargo-near-build = { version = "0.11.3", features = ["build_internal"] }
